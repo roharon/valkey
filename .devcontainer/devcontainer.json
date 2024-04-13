@@ -1,0 +1,8 @@
+{
+	"name": "ubuntu",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+
+	"postCreateCommand": "apt-get update && apt-get install -y build-essential"
+}
