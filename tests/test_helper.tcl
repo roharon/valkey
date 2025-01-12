@@ -1,11 +1,11 @@
-# Server test suite. Copyright (C) 2009 Salvatore Sanfilippo antirez@gmail.com
+# Server test suite. Copyright (C) 2009 Redis Ltd.
 # This software is released under the BSD License. See the COPYING file for
 # more information.
 
 package require Tcl 8.5
 
 set tcl_precision 17
-source tests/support/redis.tcl
+source tests/support/valkey.tcl
 source tests/support/aofmanifest.tcl
 source tests/support/server.tcl
 source tests/support/cluster_util.tcl
@@ -13,100 +13,36 @@ source tests/support/tmpfile.tcl
 source tests/support/test.tcl
 source tests/support/util.tcl
 
-set ::all_tests {
-    unit/printver
-    unit/dump
-    unit/auth
-    unit/protocol
-    unit/keyspace
-    unit/scan
-    unit/info
-    unit/info-command
-    unit/type/string
-    unit/type/incr
-    unit/type/list
-    unit/type/list-2
-    unit/type/list-3
-    unit/type/set
-    unit/type/zset
-    unit/type/hash
-    unit/type/stream
-    unit/type/stream-cgroups
-    unit/sort
-    unit/expire
-    unit/other
-    unit/multi
-    unit/quit
-    unit/aofrw
-    unit/acl
-    unit/acl-v2
-    unit/latency-monitor
-    integration/block-repl
-    integration/replication
-    integration/replication-2
-    integration/replication-3
-    integration/replication-4
-    integration/replication-psync
-    integration/replication-buffer
-    integration/shutdown
-    integration/aof
-    integration/aof-race
-    integration/aof-multi-part
-    integration/rdb
-    integration/corrupt-dump
-    integration/corrupt-dump-fuzzer
-    integration/convert-zipmap-hash-on-load
-    integration/convert-ziplist-hash-on-load
-    integration/convert-ziplist-zset-on-load
-    integration/logging
-    integration/psync2
-    integration/psync2-reg
-    integration/psync2-pingoff
-    integration/psync2-master-restart
-    integration/failover
-    integration/valkey-cli
-    integration/valkey-benchmark
-    integration/dismiss-mem
-    unit/pubsub
-    unit/pubsubshard
-    unit/slowlog
-    unit/scripting
-    unit/functions
-    unit/maxmemory
-    unit/introspection
-    unit/introspection-2
-    unit/limits
-    unit/obuf-limits
-    unit/bitops
-    unit/bitfield
-    unit/geo
-    unit/memefficiency
-    unit/hyperloglog
-    unit/lazyfree
-    unit/wait
-    unit/pause
-    unit/querybuf
-    unit/tls
-    unit/tracking
-    unit/oom-score-adj
-    unit/shutdown
-    unit/networking
-    unit/client-eviction
-    unit/violations
-    unit/replybufsize
-    unit/cluster/announced-endpoints
-    unit/cluster/misc
-    unit/cluster/cli
-    unit/cluster/scripting
-    unit/cluster/hostnames
-    unit/cluster/human-announced-nodename
-    unit/cluster/multi-slot-operations
-    unit/cluster/slot-ownership
-    unit/cluster/links
-    unit/cluster/cluster-response-tls
-    unit/cluster/failure-marking
-    unit/cluster/sharded-pubsub
+set dir [pwd]
+set ::all_tests []
+set ::cluster_all_test []
+set ::module_api_all_tests []
+
+set test_dirs {
+    unit
+    unit/type
+    unit/cluster
+    integration
 }
+
+foreach test_dir $test_dirs {
+    set files [glob -nocomplain $dir/tests/$test_dir/*.tcl]
+
+    foreach file $files {
+        lappend ::all_tests $test_dir/[file root [file tail $file]]
+    }
+}
+
+set cluster_test_dir unit/cluster
+foreach file [glob -nocomplain $dir/tests/$cluster_test_dir/*.tcl] {
+    lappend ::cluster_all_tests $cluster_test_dir/[file root [file tail $file]]
+}
+
+set moduleapi_test_dir unit/moduleapi
+foreach file [glob -nocomplain $dir/tests/$moduleapi_test_dir/*.tcl] {
+    lappend ::module_api_all_tests $moduleapi_test_dir/[file root [file tail $file]]
+}
+
 # Index to the next test to run in the ::all_tests list.
 set ::next_test 0
 
@@ -118,6 +54,7 @@ set ::traceleaks 0
 set ::valgrind 0
 set ::durable 0
 set ::tls 0
+set ::io_threads 0
 set ::tls_module 0
 set ::stack_logging 0
 set ::verbose 0
@@ -142,6 +79,7 @@ set ::active_servers {} ; # Pids of active server instances.
 set ::dont_clean 0
 set ::dont_pre_clean 0
 set ::wait_server 0
+set ::exit_on_failure 0
 set ::stop_on_failure 0
 set ::dump_logs 0
 set ::loop 0
@@ -153,6 +91,8 @@ set ::ignoredigest 0
 set ::large_memory 0
 set ::log_req_res 0
 set ::force_resp3 0
+set ::solo_tests_count 0
+set ::debug_defrag 0
 
 # Set to 1 when we are running in client mode. The server test uses a
 # server-client model to run tests simultaneously. The server instance
@@ -240,7 +180,7 @@ proc reconnect {args} {
     set host [dict get $srv "host"]
     set port [dict get $srv "port"]
     set config [dict get $srv "config"]
-    set client [redis $host $port 0 $::tls]
+    set client [valkey $host $port 0 $::tls]
     if {[dict exists $srv "client"]} {
         set old [dict get $srv "client"]
         $old close
@@ -264,7 +204,7 @@ proc valkey_deferring_client {args} {
     }
 
     # create client that defers reading reply
-    set client [redis [srv $level "host"] [srv $level "port"] 1 $::tls]
+    set client [valkey [srv $level "host"] [srv $level "port"] 1 $::tls]
 
     # select the right db and read the response (OK)
     if {!$::singledb} {
@@ -286,7 +226,7 @@ proc valkey_client {args} {
     }
 
     # create client that won't defers reading reply
-    set client [redis [srv $level "host"] [srv $level "port"] 0 $::tls]
+    set client [valkey [srv $level "host"] [srv $level "port"] 0 $::tls]
 
     # select the right db and read the response (OK), or at least ping
     # the server if we're in a singledb mode.
@@ -295,6 +235,16 @@ proc valkey_client {args} {
     } else {
         $client select 9
     }
+    return $client
+}
+
+proc valkey_deferring_client_by_addr {host port} {
+    set client [valkey $host $port 1 $::tls]
+    return $client
+}
+
+proc valkey_client_by_addr {host port} {
+    set client [valkey $host $port 0 $::tls]
     return $client
 }
 
@@ -425,9 +375,10 @@ proc read_from_test_client fd {
         signal_idle_client $fd
     } elseif {$status eq {done}} {
         set elapsed [expr {[clock seconds]-$::clients_start_time($fd)}]
-        set all_tests_count [llength $::all_tests]
+        set all_tests_count [expr {[llength $::all_tests]+$::solo_tests_count}]
         set running_tests_count [expr {[llength $::active_clients]-1}]
-        set completed_tests_count [expr {$::next_test-$running_tests_count}]
+        set completed_solo_tests_count [expr {$::solo_tests_count-[llength $::run_solo_tests]}]
+        set completed_tests_count [expr {$::next_test-$running_tests_count+$completed_solo_tests_count}]
         puts "\[$completed_tests_count/$all_tests_count [colorstr yellow $status]\]: $data ($elapsed seconds)"
         lappend ::clients_time_history $elapsed $data
         signal_idle_client $fd
@@ -450,6 +401,11 @@ proc read_from_test_client fd {
         puts $err
         lappend ::failed_tests $err
         set ::active_clients_task($fd) "(ERR) $data"
+        if {$::exit_on_failure} {
+            puts -nonewline "(Fast fail: test will exit now)"
+            flush stdout
+            exit 1
+        }
         if {$::stop_on_failure} {
             puts -nonewline "(Test stopped, press enter to resume the tests)"
             flush stdout
@@ -465,7 +421,8 @@ proc read_from_test_client fd {
     } elseif {$status eq {server-spawning}} {
         set ::active_clients_task($fd) "(SPAWNING SERVER) $data"
     } elseif {$status eq {server-spawned}} {
-        lappend ::active_servers $data
+        set pid [string trim [lindex [split $data "-"] 0]]
+        lappend ::active_servers $pid
         set ::active_clients_task($fd) "(SPAWNED SERVER) pid:$data"
     } elseif {$status eq {server-killing}} {
         set ::active_clients_task($fd) "(KILLING SERVER) pid:$data"
@@ -474,6 +431,7 @@ proc read_from_test_client fd {
         set ::active_clients_task($fd) "(KILLED SERVER) pid:$data"
     } elseif {$status eq {run_solo}} {
         lappend ::run_solo_tests $data
+        incr ::solo_tests_count
     } else {
         if {!$::quiet} {
             puts "\[$status\]: $data"
@@ -501,7 +459,7 @@ proc kill_clients {} {
 
 proc force_kill_all_servers {} {
     foreach p $::active_servers {
-        puts "Killing still running Redis server $p"
+        puts "Killing still running Valkey server $p"
         catch {exec kill -9 $p}
     }
 }
@@ -536,7 +494,7 @@ proc signal_idle_client fd {
         send_data_packet $fd run [lindex $::all_tests $::next_test]
         lappend ::active_clients $fd
         incr ::next_test
-        if {$::loop && $::next_test == [llength $::all_tests]} {
+        if {$::loop > 1 && $::next_test == [llength $::all_tests]} {
             set ::next_test 0
             incr ::loop -1
         }
@@ -580,7 +538,7 @@ proc the_end {} {
     }
 }
 
-# The client is not even driven (the test server is instead) as we just need
+# The client is not event driven (the test server is instead) as we just need
 # to read the command, execute, reply... all this in a loop.
 proc test_client_main server_port {
     set ::test_server_fd [socket localhost $server_port]
@@ -610,6 +568,8 @@ proc send_data_packet {fd status data {elapsed 0}} {
 
 proc print_help_screen {} {
     puts [join {
+        "--cluster          Run the cluster tests, by default cluster tests run along with all tests."
+        "--moduleapi        Run the module API tests, this option should only be used in runtest-moduleapi which will build the test module."
         "--valgrind         Run the test over valgrind."
         "--durable          suppress test crashes and keep running"
         "--stack-logging    Enable OSX leaks/malloc stack logging."
@@ -628,25 +588,28 @@ proc print_help_screen {} {
         "--skipfile <file>  Name of a file containing test names or regexp patterns (if <test> starts with '/') that should be skipped (one per line). This option can be repeated."
         "--skiptest <test>  Test name or regexp pattern (if <test> starts with '/') to skip. This option can be repeated."
         "--tags <tags>      Run only tests having specified tags or not having '-' prefixed tags."
-        "--dont-clean       Don't delete redis log files after the run."
-        "--dont-pre-clean   Don't delete existing redis log files before the run."
+        "--dont-clean       Don't delete valkey log files after the run."
+        "--dont-pre-clean   Don't delete existing valkey log files before the run."
         "--no-latency       Skip latency measurements and validation by some tests."
+        "--fastfail         Exit immediately once the first test fails."
         "--stop             Blocks once the first test fails."
         "--loop             Execute the specified set of tests forever."
         "--loops <count>    Execute the specified set of tests several times."
         "--wait-server      Wait after server is started (so that you can attach a debugger)."
         "--dump-logs        Dump server log on test failure."
+        "--io-threads       Run tests with IO threads."
         "--tls              Run tests in TLS mode."
-        "--tls-module       Run tests in TLS mode with Redis module."
+        "--tls-module       Run tests in TLS mode with Valkey module."
         "--host <addr>      Run tests against an external host."
         "--port <port>      TCP port to use against external host."
-        "--baseport <port>  Initial port number for spawned redis servers."
-        "--portcount <num>  Port range for spawned redis servers."
+        "--baseport <port>  Initial port number for spawned valkey servers."
+        "--portcount <num>  Port range for spawned valkey servers."
         "--singledb         Use a single database, avoid SELECT."
         "--cluster-mode     Run tests in cluster protocol compatible mode."
         "--ignore-encoding  Don't validate object encoding."
         "--ignore-digest    Don't use debug digest validations."
         "--large-memory     Run tests using over 100mb."
+        "--debug-defrag     Indicate the test is running against server compiled with DEBUG_FORCE_DEFRAG option"
         "--help             Print this help screen."
     } "\n"]
 }
@@ -664,6 +627,10 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
             }
         }
         incr j
+    } elseif {$opt eq {--cluster}} {
+        set ::all_tests $::cluster_all_tests
+    } elseif {$opt eq {--moduleapi}} {
+        set ::all_tests $::module_api_all_tests
     } elseif {$opt eq {--config}} {
         set arg2 [lindex $argv [expr $j+2]]
         lappend ::global_overrides $arg
@@ -690,6 +657,8 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
         }
     } elseif {$opt eq {--quiet}} {
         set ::quiet 1
+    } elseif {$opt eq {--io-threads}} {
+        set ::io_threads 1
     } elseif {$opt eq {--tls} || $opt eq {--tls-module}} {
         package require tls 1.6
         set ::tls 1
@@ -755,12 +724,18 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
         set ::wait_server 1
     } elseif {$opt eq {--dump-logs}} {
         set ::dump_logs 1
+    } elseif {$opt eq {--fastfail}} {
+        set ::exit_on_failure 1
     } elseif {$opt eq {--stop}} {
         set ::stop_on_failure 1
     } elseif {$opt eq {--loop}} {
         set ::loop 2147483647
     } elseif {$opt eq {--loops}} {
         set ::loop $arg
+        if {$::loop <= 0} {
+            puts "Wrong argument: $opt, loops should be greater than 0"
+            exit 1
+        }
         incr j
     } elseif {$opt eq {--timeout}} {
         set ::timeout $arg
@@ -776,6 +751,8 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
         set ::ignoreencoding 1
     } elseif {$opt eq {--ignore-digest}} {
         set ::ignoredigest 1
+    } elseif {$opt eq {--debug-defrag}} {
+        set ::debug_defrag 1
     } elseif {$opt eq {--help}} {
         print_help_screen
         exit 0
@@ -877,7 +854,7 @@ proc read_from_replication_stream {s} {
     set res {}
     for {set j 0} {$j < $count} {incr j} {
         read $s 1
-        set arg [::redis::redis_bulk_read $s]
+        set arg [::valkey::valkey_bulk_read $s]
         if {$j == 0} {set arg [string tolower $arg]}
         lappend res $arg
     }

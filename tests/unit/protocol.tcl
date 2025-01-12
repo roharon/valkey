@@ -94,7 +94,7 @@ start_server {tags {"protocol network"}} {
                     set elapsed [expr {[clock seconds]-$test_start}]
                     if {$elapsed > $test_time_limit} {
                         close $s
-                        error "assertion:Redis did not closed connection after protocol desync"
+                        error "assertion:Valkey did not closed connection after protocol desync"
                     }
                 }
             }
@@ -230,6 +230,40 @@ start_server {tags {"protocol network"}} {
         assert_equal [r exec] 2
     }
 
+}
+
+start_server {tags {"protocol hello logreqres:skip"}} {
+    test {HELLO without protover} {
+        set reply [r HELLO 3]
+        assert_equal [dict get $reply proto] 3
+
+        set reply [r HELLO]
+        assert_equal [dict get $reply proto] 3
+
+        set reply [r HELLO 2]
+        assert_equal [dict get $reply proto] 2
+
+        set reply [r HELLO]
+        assert_equal [dict get $reply proto] 2
+    }
+
+    test {HELLO and availability-zone} {
+        r CONFIG SET availability-zone myzone
+
+        set reply [r HELLO 3]
+        assert_equal [dict get $reply availability_zone] myzone
+
+        set reply [r HELLO 2]
+        assert_equal [dict get $reply availability_zone] myzone
+
+        r CONFIG SET availability-zone ""
+
+        set reply [r HELLO 3]
+        assert_equal [dict exists $reply availability_zone] 0
+
+        set reply [r HELLO 2]
+        assert_equal [dict exists $reply availability_zone] 0
+    }
 }
 
 start_server {tags {"regression"}} {
